@@ -9,35 +9,34 @@ import dearpygui.dearpygui as dpg
 from amplifier.audio.engine import AudioEngine
 from amplifier.config import PEAK_DECAY
 from amplifier.logbus import LogTee
-from amplifier.ui.window import build_ui, drain_logs_to_widget
+from amplifier import settings as user_settings
+from amplifier.ui.window import WINDOW_H, WINDOW_W, build_ui
 
 
-WINDOW_SIZE = 880
-
-
-def _centered_viewport(size: int) -> tuple[int, int, int]:
+def _centered_viewport(w: int, h: int) -> tuple[int, int]:
     try:
         user32 = ctypes.windll.user32
         sw = int(user32.GetSystemMetrics(0))
         sh = int(user32.GetSystemMetrics(1))
     except Exception:
         sw, sh = 1920, 1080
-    x = max(0, (sw - size) // 2)
-    y = max(0, (sh - size) // 2)
-    return size, x, y
+    x = max(0, (sw - w) // 2)
+    y = max(0, (sh - h) // 2)
+    return x, y
 
 
 def run() -> int:
     sys.stderr = LogTee(sys.stderr)
 
-    size, x, y = _centered_viewport(WINDOW_SIZE)
+    saved = user_settings.load()
+    x, y = _centered_viewport(WINDOW_W, WINDOW_H)
     engine = AudioEngine()
-    build_ui(engine, viewport_size=size, viewport_pos=(x, y))
+    handles = build_ui(engine, settings=saved, viewport_pos=(x, y))
     try:
         engine.start()
-        dpg.set_value("status_text", "running")
+        handles.set_status("running", ok=True)
     except Exception as e:
-        dpg.set_value("status_text", f"start error: {e}")
+        handles.set_status(f"start error: {e}", ok=False)
 
     last_rate_t = time.monotonic()
     last_in_count = 0
@@ -47,22 +46,25 @@ def run() -> int:
         s = engine.state
         s.meter_in = max(s.peak_in, s.meter_in * PEAK_DECAY)
         s.meter_out = max(s.peak_out, s.meter_out * PEAK_DECAY)
-        dpg.set_value("vu_in", min(s.meter_in, 1.0))
-        dpg.set_value("vu_out", min(s.meter_out, 1.0))
+        handles.meter.update(s.meter_in, s.meter_out)
 
         now = time.monotonic()
         dt = now - last_rate_t
         if dt >= 1.0:
             in_rate = (s.in_callbacks - last_in_count) / dt
             out_rate = (s.out_callbacks - last_out_count) / dt
-            dpg.set_value("rate_in", f"{in_rate:.0f} cb/s")
-            dpg.set_value("rate_out", f"{out_rate:.0f} cb/s")
+            handles.set_footer_rates(in_rate, out_rate)
             last_in_count = s.in_callbacks
             last_out_count = s.out_callbacks
             last_rate_t = now
 
-        drain_logs_to_widget()
+        handles.drain_logs()
         dpg.render_dearpygui_frame()
+
+    try:
+        user_settings.save(handles.get_persisted_settings())
+    except Exception as e:
+        print(f"[settings save] {e}", file=sys.__stderr__)
 
     engine.stop()
     dpg.destroy_context()
